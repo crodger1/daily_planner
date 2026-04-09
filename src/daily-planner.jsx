@@ -33,6 +33,17 @@ const BUDDY_FIELDS = [
   { key: "priority", label: "🎯 Tomorrow's #1 priority task", placeholder: "The single most important thing for tomorrow..." },
 ];
 
+const storage = {
+  get: async (key) => {
+    const value = localStorage.getItem(key);
+    return value ? { value } : null;
+  },
+  set: async (key, value) => {
+    localStorage.setItem(key, value);
+    return { value };
+  },
+};
+
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
 const defaultTasks = () =>
@@ -66,15 +77,15 @@ export default function DailyPlanner() {
   useEffect(() => {
     const load = async () => {
       try {
-        const taskResult = await window.storage.get(`tasks:${todayKey()}`);
+        const taskResult = await storage.get(`tasks:${todayKey()}`);
         if (taskResult) setTasks(JSON.parse(taskResult.value));
       } catch {}
       try {
-        const buddyResult = await window.storage.get(`buddy:${todayKey()}`);
+        const buddyResult = await storage.get(`buddy:${todayKey()}`);
         if (buddyResult) setBuddy(JSON.parse(buddyResult.value));
       } catch {}
       try {
-        const histResult = await window.storage.get("history:index");
+        const histResult = await storage.get("history:index");
         if (histResult) setHistory(JSON.parse(histResult.value));
       } catch {}
       setLoading(false);
@@ -89,7 +100,7 @@ export default function DailyPlanner() {
 
   const saveTasks = useCallback(async (updated) => {
     try {
-      await window.storage.set(`tasks:${todayKey()}`, JSON.stringify(updated));
+      await storage.set(`tasks:${todayKey()}`, JSON.stringify(updated));
       flashSaved();
     } catch {}
   }, []);
@@ -106,10 +117,10 @@ export default function DailyPlanner() {
 
   const saveBuddyNow = async () => {
     try {
-      await window.storage.set(`buddy:${todayKey()}`, JSON.stringify(buddy));
+      await storage.set(`buddy:${todayKey()}`, JSON.stringify(buddy));
       const key = todayKey();
       const newHistory = history.includes(key) ? history : [key, ...history].slice(0, 30);
-      await window.storage.set("history:index", JSON.stringify(newHistory));
+      await storage.set("history:index", JSON.stringify(newHistory));
       setHistory(newHistory);
       flashSaved();
     } catch {}
@@ -119,9 +130,9 @@ export default function DailyPlanner() {
     try {
       const key = todayKey();
       const snapshot = { tasks, buddy, date: key };
-      await window.storage.set(`archive:${key}`, JSON.stringify(snapshot));
+      await storage.set(`archive:${key}`, JSON.stringify(snapshot));
       const newHistory = history.includes(key) ? history : [key, ...history].slice(0, 30);
-      await window.storage.set("history:index", JSON.stringify(newHistory));
+      await storage.set("history:index", JSON.stringify(newHistory));
       setHistory(newHistory);
     } catch {}
     const incomplete = tasks.filter((t) => !t.done);
@@ -142,7 +153,7 @@ export default function DailyPlanner() {
 
   const loadHistoryDay = async (dateKey) => {
     try {
-      const res = await window.storage.get(`archive:${dateKey}`);
+      const res = await storage.get(`archive:${dateKey}`);
       if (res) {
         setViewingData(JSON.parse(res.value));
         setViewingDate(dateKey);
