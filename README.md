@@ -1,6 +1,6 @@
 # Daily Planner
 
-A structured daily planner combining time-block scheduling with the **Ivy Lee Method** — built with React and persistent local storage.
+A structured daily planner combining time-block scheduling with the **Ivy Lee Method** — built with React and persistent local storage in the browser.
 
 ## What It Does
 
@@ -41,9 +41,12 @@ Then open [http://localhost:5173](http://localhost:5173).
 
 - React 18
 - Vite
-- Claude artifact persistent storage API (`window.storage`)
 
-> **Note:** The `window.storage` API is specific to the Claude.ai artifact environment. If running outside Claude, you'll want to swap it for `localStorage` or another persistence layer.
+
+
+
+
+- Broswser cache storage
 
 ## Task Buckets
 
