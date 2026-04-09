@@ -12,7 +12,7 @@ Helps job seekers (and anyone with a full plate) structure their days with inten
 - **Daily Structure** — Time-block schedule with a weekly job search focus rotation.
 - **Buddy Check-In** — End-of-day accountability form to fill out before a 10-minute check-in call.
 - **History** — Automatically archives each day's tasks and check-in notes. Browse past days anytime.
-- **Persistent Storage** — Everything saves automatically between sessions using the Claude artifact storage API.
+- **Persistent Storage** — Everything saves automatically between sessions using browser cache.
 
 ## The Ivy Lee Method
 
