@@ -26,11 +26,12 @@ const FOCUS_ROTATION = [
 ];
 
 const BUDDY_FIELDS = [
-  { key: "completed", label: "✅ Tasks I completed today", placeholder: "Which of your 6 did you finish?" },
-  { key: "carryover", label: "➡️ Carrying over to tomorrow", placeholder: "Which tasks roll forward?" },
+  { key: "completed", kind: "auto-done", label: "✅ Tasks I completed today", placeholder: "Add any detail on how these went..." },
+  { key: "carryover", kind: "auto-pending", label: "➡️ Carrying over to tomorrow", placeholder: "Add detail — these may still get done before your check-in..." },
   { key: "win", label: "🏆 One real win from today", placeholder: "Something you moved forward, however small..." },
   { key: "blocker", label: "⚡ One thing that got in the way", placeholder: "What slowed you down? Pattern to address?" },
   { key: "priority", label: "🎯 Tomorrow's #1 priority task", placeholder: "The single most important thing for tomorrow..." },
+  { key: "buddyNotes", label: "🤝 Notes on your buddy's update", placeholder: "Anything from their side worth following up on tomorrow..." },
 ];
 
 const storage = {
@@ -44,7 +45,17 @@ const storage = {
   },
 };
 
-const todayKey = () => new Date().toISOString().slice(0, 10);
+// Logical "planning day" runs until 2am — late nights still belong to the prior day
+const todayKey = (date = new Date()) => {
+  const d = new Date(date);
+  if (d.getHours() < 2) d.setDate(d.getDate() - 1);
+  // Build the date string from local components — toISOString() converts to UTC,
+  // which would shift the date for anyone west of Greenwich in the evening
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 const defaultTasks = () =>
   BUCKETS.map((b, i) => ({ id: i, bucket: b, text: "", done: false }));
@@ -52,12 +63,62 @@ const defaultTasks = () =>
 const defaultBuddy = () =>
   Object.fromEntries(BUDDY_FIELDS.map((f) => [f.key, ""]));
 
-function getDayLabel() {
-  return new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+function formatLongDate(key) {
+  return new Date(key + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
 }
 
 function formatHistoryDate(key) {
   return new Date(key + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+function buildCarryOverList(sourceTasks) {
+  const incomplete = sourceTasks.filter((t) => !t.done);
+  const complete = sourceTasks.filter((t) => t.done);
+  return [...incomplete, ...complete.map((t) => ({ ...t, done: false, text: "" }))]
+    .slice(0, 6)
+    .map((t, i) => ({ ...t, id: i }));
+}
+
+// Closes out a finished planning day in storage and preps the next day's starting list.
+// Runs at app load when the logical day has changed since the last session.
+async function rolloverDay(oldKey, newKey) {
+  let oldTasks = defaultTasks();
+  let oldBuddy = defaultBuddy();
+  try {
+    const t = await storage.get(`tasks:${oldKey}`);
+    if (t) oldTasks = JSON.parse(t.value);
+  } catch {}
+  try {
+    const b = await storage.get(`buddy:${oldKey}`);
+    if (b) oldBuddy = JSON.parse(b.value);
+  } catch {}
+
+  let alreadyCarried = false;
+  try {
+    alreadyCarried = !!(await storage.get(`carriedOver:${oldKey}`));
+  } catch {}
+
+  let nextTasks;
+  if (alreadyCarried) {
+    nextTasks = oldTasks;
+  } else {
+    try {
+      await storage.set(`archive:${oldKey}`, JSON.stringify({ tasks: oldTasks, buddy: oldBuddy, date: oldKey }));
+    } catch {}
+    nextTasks = buildCarryOverList(oldTasks);
+  }
+
+  try {
+    await storage.set(`tasks:${newKey}`, JSON.stringify(nextTasks));
+    await storage.set(`buddy:${newKey}`, JSON.stringify(defaultBuddy()));
+  } catch {}
+
+  try {
+    const histResult = await storage.get("history:index");
+    let hist = histResult ? JSON.parse(histResult.value) : [];
+    if (!hist.includes(oldKey)) hist = [oldKey, ...hist].slice(0, 30);
+    await storage.set("history:index", JSON.stringify(hist));
+  } catch {}
 }
 
 export default function DailyPlanner() {
@@ -69,20 +130,38 @@ export default function DailyPlanner() {
   const [savedIndicator, setSavedIndicator] = useState(false);
   const [viewingDate, setViewingDate] = useState(null);
   const [viewingData, setViewingData] = useState(null);
+  const [archives, setArchives] = useState({});
+  const [carriedOverToday, setCarriedOverToday] = useState(false);
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() };
+  });
 
-  const todayDay = new Date().toLocaleDateString("en-US", { weekday: "short" });
+  const todayDay = new Date(todayKey() + "T12:00:00").toLocaleDateString("en-US", { weekday: "short" });
   const todayFocus = FOCUS_ROTATION.find((r) => r.day === todayDay);
   const completed = tasks.filter((t) => t.done).length;
 
   useEffect(() => {
     const load = async () => {
+      const currentKey = todayKey();
       try {
-        const taskResult = await storage.get(`tasks:${todayKey()}`);
+        const lastActive = await storage.get("lastActiveDay");
+        if (lastActive && lastActive.value && lastActive.value !== currentKey) {
+          await rolloverDay(lastActive.value, currentKey);
+        }
+        await storage.set("lastActiveDay", currentKey);
+      } catch {}
+
+      try {
+        const taskResult = await storage.get(`tasks:${currentKey}`);
         if (taskResult) setTasks(JSON.parse(taskResult.value));
       } catch {}
       try {
-        const buddyResult = await storage.get(`buddy:${todayKey()}`);
+        const buddyResult = await storage.get(`buddy:${currentKey}`);
         if (buddyResult) setBuddy(JSON.parse(buddyResult.value));
+      } catch {}
+      try {
+        setCarriedOverToday(!!(await storage.get(`carriedOver:${currentKey}`)));
       } catch {}
       try {
         const histResult = await storage.get("history:index");
@@ -92,6 +171,39 @@ export default function DailyPlanner() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    if (!history.length) return;
+    const loadArchives = async () => {
+      const entries = {};
+      for (const dateKey of history) {
+        try {
+          const res = await storage.get(`archive:${dateKey}`);
+          if (res) entries[dateKey] = JSON.parse(res.value);
+        } catch {}
+      }
+      setArchives(entries);
+    };
+    loadArchives();
+  }, [history]);
+
+  // Keep today's archive snapshot continuously in sync with both tasks and buddy notes,
+  // so saving one doesn't overwrite or go stale relative to the other.
+  useEffect(() => {
+    if (loading) return;
+    const key = todayKey();
+    let cancelled = false;
+    (async () => {
+      try {
+        const existing = await storage.get(`archive:${key}`);
+        if (cancelled || !existing) return;
+        const snapshot = { tasks, buddy, date: key };
+        await storage.set(`archive:${key}`, JSON.stringify(snapshot));
+        if (!cancelled) setArchives((prev) => ({ ...prev, [key]: snapshot }));
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [tasks, buddy, loading]);
 
   const flashSaved = () => {
     setSavedIndicator(true);
@@ -117,30 +229,40 @@ export default function DailyPlanner() {
 
   const saveBuddyNow = async () => {
     try {
-      await storage.set(`buddy:${todayKey()}`, JSON.stringify(buddy));
       const key = todayKey();
+      const snapshot = { tasks, buddy, date: key };
+      await storage.set(`buddy:${key}`, JSON.stringify(buddy));
+      await storage.set(`archive:${key}`, JSON.stringify(snapshot));
       const newHistory = history.includes(key) ? history : [key, ...history].slice(0, 30);
       await storage.set("history:index", JSON.stringify(newHistory));
       setHistory(newHistory);
+      setArchives((prev) => ({ ...prev, [key]: snapshot }));
       flashSaved();
     } catch {}
   };
 
   const carryOver = async () => {
+    const key = todayKey();
     try {
-      const key = todayKey();
       const snapshot = { tasks, buddy, date: key };
       await storage.set(`archive:${key}`, JSON.stringify(snapshot));
       const newHistory = history.includes(key) ? history : [key, ...history].slice(0, 30);
       await storage.set("history:index", JSON.stringify(newHistory));
       setHistory(newHistory);
+      setArchives((prev) => ({ ...prev, [key]: snapshot }));
     } catch {}
-    const incomplete = tasks.filter((t) => !t.done);
-    const complete = tasks.filter((t) => t.done);
-    const reordered = [...incomplete, ...complete.map((t) => ({ ...t, done: false, text: "" }))].slice(0, 6).map((t, i) => ({ ...t, id: i }));
-    setTasks(reordered);
-    setBuddy(defaultBuddy());
-    await saveTasks(reordered);
+
+    // Only reshuffle into "tomorrow's" list once per day — repeat clicks just re-save the snapshot above
+    if (!carriedOverToday) {
+      const reordered = buildCarryOverList(tasks);
+      setTasks(reordered);
+      setBuddy(defaultBuddy());
+      await saveTasks(reordered);
+      try {
+        await storage.set(`carriedOver:${key}`, "true");
+      } catch {}
+      setCarriedOverToday(true);
+    }
     flashSaved();
   };
 
@@ -149,6 +271,10 @@ export default function DailyPlanner() {
     setTasks(fresh);
     setBuddy(defaultBuddy());
     await saveTasks(fresh);
+    try {
+      localStorage.removeItem(`carriedOver:${todayKey()}`);
+    } catch {}
+    setCarriedOverToday(false);
   };
 
   const loadHistoryDay = async (dateKey) => {
@@ -161,6 +287,50 @@ export default function DailyPlanner() {
       }
     } catch {}
   };
+
+  const shiftMonth = (delta) => {
+    setCalendarMonth(({ year, month }) => {
+      const d = new Date(year, month + delta, 1);
+      return { year: d.getFullYear(), month: d.getMonth() };
+    });
+  };
+
+  const exportArchive = () => {
+    const entries = history
+      .filter((dateKey) => archives[dateKey])
+      .map((dateKey) => {
+        const archive = archives[dateKey];
+        return {
+          date: archive.date,
+          tasks: archive.tasks.map((t) => ({ bucket: t.bucket.label, text: t.text, done: t.done })),
+          buddy: archive.buddy,
+        };
+      })
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const blob = new Blob([JSON.stringify(entries, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `daily-planner-archive-${todayKey()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const monthLabel = new Date(calendarMonth.year, calendarMonth.month, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+  const monthCells = (() => {
+    const { year, month } = calendarMonth;
+    const firstWeekday = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells = Array(firstWeekday).fill(null);
+    for (let day = 1; day <= daysInMonth; day++) {
+      cells.push({ day, dateKey: `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}` });
+    }
+    return cells;
+  })();
 
   if (loading) {
     return (
@@ -186,7 +356,7 @@ export default function DailyPlanner() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div>
             <div style={{ fontSize: "11px", letterSpacing: "3px", textTransform: "uppercase", color: "#C8A96E", marginBottom: "6px" }}>Daily Structure & Ivy Lee Planner</div>
-            <div style={{ fontSize: "26px", fontWeight: "normal" }}>{getDayLabel()}</div>
+            <div style={{ fontSize: "26px", fontWeight: "normal" }}>{formatLongDate(todayKey())}</div>
             {todayFocus && (
               <div style={{ marginTop: "8px", fontSize: "13px", color: "#A0A0A0" }}>
                 Today's focus: <span style={{ color: "#C8A96E" }}>{todayFocus.focus}</span>
@@ -248,14 +418,16 @@ export default function DailyPlanner() {
 
             <div style={{ display: "flex", gap: "12px", marginTop: "20px", flexWrap: "wrap" }}>
               <button onClick={carryOver} style={{ padding: "10px 20px", background: "#1A1A1A", color: "#F5F0E8", border: "none", fontFamily: "inherit", fontSize: "11px", letterSpacing: "2px", textTransform: "uppercase", cursor: "pointer", borderRadius: "2px" }}>
-                Archive & Carry Over →
+                {carriedOverToday ? "✓ Carried Over — Re-save Snapshot" : "Archive & Carry Over →"}
               </button>
               <button onClick={resetDay} style={{ padding: "10px 20px", background: "transparent", color: "#7A6E5A", border: "1px solid #C8B89A", fontFamily: "inherit", fontSize: "11px", letterSpacing: "2px", textTransform: "uppercase", cursor: "pointer", borderRadius: "2px" }}>
                 Reset Day
               </button>
             </div>
             <div style={{ marginTop: "12px", fontSize: "11px", color: "#9A8E7A", lineHeight: "1.6" }}>
-              Tasks save automatically when you check them off or click away. Hit <strong>Archive & Carry Over</strong> at end of day to log to History and promote incomplete tasks.
+              {carriedOverToday
+                ? <>Already carried over for today — this list is set up for your next session, and your check-in stays intact. Clicking the button again just re-saves the current snapshot to History; it won't reshuffle your list a second time.</>
+                : <>Tasks save automatically when you check them off or click away. Hit <strong>Archive & Carry Over</strong> at end of day to log to History and promote incomplete tasks. The planning day runs until 2am — and rolls over automatically the next time you open the app.</>}
             </div>
           </div>
         )}
@@ -295,13 +467,34 @@ export default function DailyPlanner() {
           <div>
             <div style={{ fontSize: "12px", letterSpacing: "2px", textTransform: "uppercase", color: "#7A6E5A", marginBottom: "6px" }}>End-of-Day Accountability Check-In</div>
             <div style={{ fontSize: "13px", color: "#6A6050", marginBottom: "24px" }}>Fill this out before your ~5pm call, then hit Save. It'll be logged to History.</div>
-            {BUDDY_FIELDS.map((field) => (
-              <div key={field.key} style={{ marginBottom: "18px" }}>
-                <div style={{ fontSize: "12px", fontWeight: "bold", marginBottom: "8px", color: "#3A3020" }}>{field.label}</div>
-                <textarea value={buddy[field.key]} onChange={(e) => updateBuddy(field.key, e.target.value)} placeholder={field.placeholder} rows={3}
-                  style={{ width: "100%", padding: "12px", fontFamily: "inherit", fontSize: "14px", background: "#FFFFFF", border: "1px solid #C8B89A", borderRadius: "2px", color: "#1A1A1A", resize: "vertical", outline: "none", lineHeight: "1.6", boxSizing: "border-box" }} />
-              </div>
-            ))}
+            {BUDDY_FIELDS.map((field) => {
+              const autoTasks = field.kind === "auto-done" ? tasks.filter((t) => t.done && t.text)
+                : field.kind === "auto-pending" ? tasks.filter((t) => !t.done && t.text)
+                : null;
+              return (
+                <div key={field.key} style={{ marginBottom: "18px" }}>
+                  <div style={{ fontSize: "12px", fontWeight: "bold", marginBottom: "8px", color: "#3A3020" }}>{field.label}</div>
+                  {autoTasks && (
+                    autoTasks.length > 0 ? (
+                      <div style={{ marginBottom: "10px" }}>
+                        {autoTasks.map((t) => (
+                          <div key={t.id} style={{ display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px", marginBottom: "4px", background: "#FFFFFF", border: "1px solid #D4C9B0", borderLeft: `3px solid ${t.bucket.color}`, borderRadius: "2px", fontSize: "13px" }}>
+                            <span>{t.bucket.emoji}</span>
+                            <span style={{ color: "#1A1A1A" }}>{t.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: "13px", color: "#9A8E7A", fontStyle: "italic", marginBottom: "10px" }}>
+                        {field.kind === "auto-done" ? "Nothing checked off yet." : "Everything's checked off — nothing carrying over!"}
+                      </div>
+                    )
+                  )}
+                  <textarea value={buddy[field.key]} onChange={(e) => updateBuddy(field.key, e.target.value)} placeholder={field.placeholder} rows={autoTasks ? 2 : 3}
+                    style={{ width: "100%", padding: "12px", fontFamily: "inherit", fontSize: "14px", background: "#FFFFFF", border: "1px solid #C8B89A", borderRadius: "2px", color: "#1A1A1A", resize: "vertical", outline: "none", lineHeight: "1.6", boxSizing: "border-box" }} />
+                </div>
+              );
+            })}
             <button onClick={saveBuddyNow} style={{ padding: "10px 24px", background: "#1A1A1A", color: "#F5F0E8", border: "none", fontFamily: "inherit", fontSize: "11px", letterSpacing: "2px", textTransform: "uppercase", cursor: "pointer", borderRadius: "2px" }}>
               Save Check-In
             </button>
@@ -311,21 +504,64 @@ export default function DailyPlanner() {
           </div>
         )}
 
-        {/* HISTORY LIST */}
+        {/* HISTORY CALENDAR */}
         {tab === "history" && (
           <div>
-            <div style={{ fontSize: "12px", letterSpacing: "2px", textTransform: "uppercase", color: "#7A6E5A", marginBottom: "20px" }}>Archived Days ({history.length})</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "12px" }}>
+              <div style={{ fontSize: "12px", letterSpacing: "2px", textTransform: "uppercase", color: "#7A6E5A" }}>Archived Days ({history.length})</div>
+              {history.length > 0 && (
+                <button onClick={exportArchive} style={{ padding: "8px 16px", background: "transparent", color: "#7A6E5A", border: "1px solid #C8B89A", fontFamily: "inherit", fontSize: "11px", letterSpacing: "2px", textTransform: "uppercase", cursor: "pointer", borderRadius: "2px" }}>
+                  ⬇ Export Archive (.json)
+                </button>
+              )}
+            </div>
+
             {history.length === 0 ? (
               <div style={{ color: "#9A8E7A", fontSize: "14px", lineHeight: "1.7", padding: "20px", background: "#FFFFFF", border: "1px solid #D4C9B0" }}>
                 No archived days yet. At the end of each day, hit <strong>"Archive & Carry Over"</strong> on the Today's 6 tab to save your progress here.
               </div>
             ) : (
-              history.map((dateKey) => (
-                <button key={dateKey} onClick={() => loadHistoryDay(dateKey)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "14px 18px", marginBottom: "6px", background: "#FFFFFF", border: "1px solid #D4C9B0", borderLeft: "4px solid #C8A96E", fontFamily: "inherit", fontSize: "14px", color: "#1A1A1A", cursor: "pointer", textAlign: "left", borderRadius: "2px" }}>
-                  <span>{formatHistoryDate(dateKey)}</span>
-                  <span style={{ fontSize: "11px", color: "#9A8E7A", letterSpacing: "1px", textTransform: "uppercase" }}>View →</span>
-                </button>
-              ))
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+                  <button onClick={() => shiftMonth(-1)} style={{ background: "none", border: "1px solid #C8B89A", borderRadius: "2px", padding: "6px 14px", cursor: "pointer", color: "#7A6E5A", fontFamily: "inherit", fontSize: "13px" }}>←</button>
+                  <div style={{ fontSize: "15px", color: "#1A1A1A" }}>{monthLabel}</div>
+                  <button onClick={() => shiftMonth(1)} style={{ background: "none", border: "1px solid #C8B89A", borderRadius: "2px", padding: "6px 14px", cursor: "pointer", color: "#7A6E5A", fontFamily: "inherit", fontSize: "13px" }}>→</button>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "6px", marginBottom: "8px" }}>
+                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => (
+                    <div key={d} style={{ textAlign: "center", fontSize: "10px", letterSpacing: "1px", textTransform: "uppercase", color: "#9A8E7A" }}>{d}</div>
+                  ))}
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: "6px" }}>
+                  {monthCells.map((cell, i) => {
+                    if (!cell) return <div key={i} />;
+                    const archive = archives[cell.dateKey];
+                    const score = archive ? archive.tasks.filter((t) => t.done).length : null;
+                    const isWin = score !== null && score >= 3;
+                    return (
+                      <button key={i} onClick={() => archive && loadHistoryDay(cell.dateKey)} disabled={!archive}
+                        style={{
+                          aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "2px",
+                          background: archive ? (isWin ? "#E8F0EC" : "#FCF3E0") : "#FFFFFF",
+                          border: `1px solid ${archive ? (isWin ? "#B0D4BC" : "#E8D4A8") : "#D4C9B0"}`,
+                          borderRadius: "4px", cursor: archive ? "pointer" : "default",
+                          fontFamily: "inherit", padding: "4px",
+                        }}>
+                        <span style={{ fontSize: "13px", color: archive ? "#1A1A1A" : "#C8B89A" }}>{cell.day}</span>
+                        {archive && (
+                          <span style={{ fontSize: "10px", fontWeight: "bold", color: isWin ? "#2D4A3E" : "#A8821E" }}>{score}/6{isWin ? " ✓" : ""}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div style={{ marginTop: "16px", fontSize: "11px", color: "#9A8E7A", lineHeight: "1.6" }}>
+                  Click a highlighted day to view its tasks and buddy notes. <span style={{ color: "#2D4A3E" }}>■</span> = win day (3+ tasks completed) · <span style={{ color: "#A8821E" }}>■</span> = logged, fewer than 3 completed
+                </div>
+              </div>
             )}
           </div>
         )}
